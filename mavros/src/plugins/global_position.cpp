@@ -26,6 +26,7 @@
 #include <sensor_msgs/NavSatFix.h>
 #include <sensor_msgs/NavSatStatus.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <geometry_msgs/TwistStamped.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geographic_msgs/GeoPointStamped.h>
@@ -73,6 +74,7 @@ public:
 
 		// gps data
 		raw_fix_pub = gp_nh.advertise<sensor_msgs::NavSatFix>("raw/fix", 10);
+		raw_pose_pub = gp_nh.advertise<geometry_msgs::PoseWithCovarianceStamped>("raw/pose", 10);
 		raw_vel_pub = gp_nh.advertise<geometry_msgs::TwistStamped>("raw/gps_vel", 10);
 
 		// fused global position
@@ -108,6 +110,7 @@ private:
 	ros::NodeHandle gp_nh;
 
 	ros::Publisher raw_fix_pub;
+	ros::Publisher raw_pose_pub;
 	ros::Publisher raw_vel_pub;
 	ros::Publisher gp_odom_pub;
 	ros::Publisher gp_fix_pub;
@@ -128,13 +131,16 @@ private:
 	bool tf_send;
 	bool use_relative_alt;
 	bool is_map_init;
+	bool is_map_init_raw;
 
 	double rot_cov;
 	double gps_uere;
 
-	Eigen::Vector3d map_origin {};	//!< geodetic origin of map frame [lla]
-	Eigen::Vector3d ecef_origin {};	//!< geocentric origin of map frame [m]
-	Eigen::Vector3d local_ecef {};	//!< local ECEF coordinates on map frame [m]
+	Eigen::Vector3d map_origin {};		//!< geodetic origin of map frame [lla]
+	Eigen::Vector3d ecef_origin {};		//!< geocentric origin of map frame [m]
+	Eigen::Vector3d ecef_origin_raw {};	//!< geocentric origin of map frame (from raw GPS data) [m]
+	Eigen::Vector3d local_ecef {};		//!< local ECEF coordinates on map frame [m]
+	Eigen::Vector3d local_ecef_raw {};	//!< local ECEF coordinates on map frame (from raw GPS data) [m]
 
 	template<typename MsgT>
 	inline void fill_lla(MsgT &msg, sensor_msgs::NavSatFix::Ptr fix)
@@ -156,8 +162,10 @@ private:
 	void handle_gps_raw_int(const mavlink::mavlink_message_t *msg, mavlink::common::msg::GPS_RAW_INT &raw_gps)
 	{
 		auto fix = boost::make_shared<sensor_msgs::NavSatFix>();
+		auto pose = boost::make_shared<geometry_msgs::PoseWithCovarianceStamped>();
 
 		fix->header = m_uas->synchronized_header(child_frame_id, raw_gps.time_usec);
+		pose->header = fix->header;
 
 		fix->status.service = sensor_msgs::NavSatStatus::SERVICE_GPS;
 		if (raw_gps.fix_type > 2)
@@ -189,9 +197,63 @@ private:
 			fill_unknown_cov(fix);
 		}
 
+		// Current fix in ECEF
+		Eigen::Vector3d map_point;
+
+		try {
+			GeographicLib::Geocentric map(GeographicLib::Constants::WGS84_a(),
+						GeographicLib::Constants::WGS84_f());
+
+			// Current fix to ECEF
+			map.Forward(fix->latitude, fix->longitude, fix->altitude,
+						map_point.x(), map_point.y(), map_point.z());
+
+			// Set the current fix as the "map" origin if it's not set
+			if (!is_map_init_raw) {
+				map_origin.x() = fix->latitude;
+				map_origin.y() = fix->longitude;
+				map_origin.z() = fix->altitude;
+
+				ecef_origin_raw = map_point; // Local position is zero
+				is_map_init_raw = true;
+			}
+		}
+		catch (const std::exception& e) {
+			ROS_INFO_STREAM("GP: Caught exception: " << e.what() << std::endl);
+		}
+
+		// Compute the local coordinates in ECEF
+		local_ecef_raw = map_point - ecef_origin_raw;
+		// Compute the local coordinates in ENU
+		tf::pointEigenToMsg(ftf::transform_frame_ecef_enu(local_ecef_raw, map_origin), pose->pose.pose.position);
+
+		/**
+		 * @brief By default, we are using the relative altitude instead of the geocentric
+		 * altitude, which is relative to the WGS-84 ellipsoid
+		 */
+		if (!use_relative_alt) {
+			if (msg->magic == MAVLINK_STX && raw_gps.alt_ellipsoid != 0.0)
+				pose->pose.pose.position.z = raw_gps.alt_ellipsoid;
+			else
+				pose->pose.pose.position.z = fix->altitude;
+		}
+
+		pose->pose.pose.orientation = m_uas->get_attitude_orientation_enu();
+
+		// Use ENU covariance to build XYZRPY covariance
+		ftf::EigenMapConstCovariance3d gps_raw_cov(fix->position_covariance.data());
+		ftf::EigenMapCovariance6d pos_raw_cov_out(pose->pose.covariance.data());
+		pos_raw_cov_out.setZero();
+		pos_raw_cov_out.block<3, 3>(0, 0) = gps_raw_cov;
+		pos_raw_cov_out.block<3, 3>(3, 3).diagonal() <<
+							rot_cov,
+								rot_cov,
+									rot_cov;
+
 		// store & publish
 		m_uas->update_gps_fix_epts(fix, eph, epv, raw_gps.fix_type, raw_gps.satellites_visible);
 		raw_fix_pub.publish(fix);
+		raw_pose_pub.publish(pose);
 
 		if (raw_gps.vel != UINT16_MAX &&
 					raw_gps.cog != UINT16_MAX) {
