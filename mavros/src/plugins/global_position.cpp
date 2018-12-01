@@ -165,7 +165,7 @@ private:
 		auto pose = boost::make_shared<geometry_msgs::PoseWithCovarianceStamped>();
 
 		fix->header = m_uas->synchronized_header(child_frame_id, raw_gps.time_usec);
-		pose->header = fix->header;
+		pose->header = m_uas->synchronized_header("local_origin", raw_gps.time_usec);
 
 		fix->status.service = sensor_msgs::NavSatStatus::SERVICE_GPS;
 		if (raw_gps.fix_type > 2)
@@ -244,7 +244,10 @@ private:
 		ftf::EigenMapConstCovariance3d gps_raw_cov(fix->position_covariance.data());
 		ftf::EigenMapCovariance6d pos_raw_cov_out(pose->pose.covariance.data());
 		pos_raw_cov_out.setZero();
-		pos_raw_cov_out.block<3, 3>(0, 0) = gps_raw_cov;
+		pos_raw_cov_out.block<3, 3>(0, 0).diagonal()  <<
+							0.015,
+								0.015,
+									0.015;
 		pos_raw_cov_out.block<3, 3>(3, 3).diagonal() <<
 							rot_cov,
 								rot_cov,
