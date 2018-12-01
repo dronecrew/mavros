@@ -245,13 +245,13 @@ private:
 		ftf::EigenMapCovariance6d pos_raw_cov_out(pose->pose.covariance.data());
 		pos_raw_cov_out.setZero();
 		pos_raw_cov_out.block<3, 3>(0, 0).diagonal()  <<
-							1,
-								1,
-									1;
+							10,
+								10,
+									10;
 		pos_raw_cov_out.block<3, 3>(3, 3).diagonal() <<
-							1,
-								1,
-									1;
+							10,
+								10,
+									10;
 
 		// store & publish
 		m_uas->update_gps_fix_epts(fix, eph, epv, raw_gps.fix_type, raw_gps.satellites_visible);
